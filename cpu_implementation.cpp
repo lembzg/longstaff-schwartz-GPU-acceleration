@@ -16,9 +16,7 @@ std::vector<double> simulate_paths(double initial_price, double maturity, int nu
         stock_prices[path * (number_of_steps + 1)] = initial_price;
     }
     
-
     // Filling up prices in each path
-
     // Create dice
     std::mt19937_64 generator(seed);
     std::normal_distribution<double> standard_normal(0.0, 1.0);
@@ -40,6 +38,101 @@ std::vector<double> simulate_paths(double initial_price, double maturity, int nu
 
     return stock_prices;
 }
+
+// Helper to find determinant
+double determinant(double a1, double b1, double c1,
+                   double a2, double b2, double c2,
+                   double a3, double b3, double c3){
+    return a1 * (b2 * c3 - c2 * b3)
+         - b1 * (a2 * c3 - c2 * a3)
+         + c1 * (a2 * b3 - b2 * a3);
+}
+
+double price_american_put(const std::vector<double>& stock_prices, int number_of_paths, int number_of_steps, double strike, double interest_rate, double time_step){
+    std::vector<double> cash_flow(number_of_paths);
+    std::vector<int> exercise_date(number_of_paths);
+
+    // Initialise cash flow to expiry date
+    for (int path = 0; path < number_of_paths; path ++){
+        double profit = strike - stock_prices[path * (number_of_steps + 1) + number_of_steps];
+        exercise_date[path] = number_of_steps;
+        if (profit > 0){
+            cash_flow[path] = profit;
+        }
+        else {
+            cash_flow[path] = 0;
+        }
+    }
+
+    // Go backwards though dates for every path
+    for (int date = number_of_steps - 1; date >= 1; date--){
+        // Sums needed for best fit
+        double count = 0, sum_x = 0, sum_x2 = 0, sum_x3 = 0, sum_x4 = 0;
+        double sum_y = 0, sum_xy = 0, sum_x2y = 0;
+
+        for (int path = 0; path < number_of_paths; path ++){
+            // Look up stock price for this path on this specific date
+            double price = stock_prices[path * (number_of_steps + 1) + date];
+
+            // Only make decision if stock is below strike
+            if (price < strike){
+                double X = price / strike;
+                // What this path pays if the person keeps waiting
+                double Y = cash_flow[path] * std::exp(-interest_rate * (exercise_date[path] - date) * time_step);
+                
+                count += 1;
+                sum_x += X;
+                sum_x2 += X * X;
+                sum_x3 += X * X * X;
+                sum_x4 += X * X * X * X;
+                sum_y += Y;
+                sum_xy += X * Y;
+                sum_x2y += X * X * Y;
+            }
+        }
+        
+        // Getting constants for the curve
+        double D = determinant(count,  sum_x,  sum_x2, sum_x,  sum_x2, sum_x3, sum_x2, sum_x3, sum_x4);
+        double D_a = determinant(sum_y,   sum_x,  sum_x2, sum_xy,  sum_x2, sum_x3, sum_x2y, sum_x3, sum_x4);
+        double D_b = determinant(count,  sum_y,   sum_x2, sum_x,  sum_xy,  sum_x3, sum_x2, sum_x2y, sum_x4);
+        double D_c = determinant(count,  sum_x,  sum_y, sum_x,  sum_x2, sum_xy, sum_x2, sum_x3, sum_x2y);
+
+        double a = D_a / D;
+        double b = D_b / D;
+        double c = D_c / D;
+        
+        // Decide whether to exercise today
+        for (int path = 0; path < number_of_paths; path ++){
+            double price = stock_prices[path * (number_of_steps + 1) + date];
+
+            if (price < strike){
+                // What you get if you exercise now
+                double exercise_value = strike - price;
+
+                // Worth based on curve
+                double X = price / strike;
+                double continuation_value = a + b * X + c * X * X;
+
+                // Overide path record if its more worth to exercise now
+                if (exercise_value > continuation_value){
+                    cash_flow[path] = exercise_value;
+                    exercise_date[path] = date;
+                }
+            }
+        }
+    }
+
+    // Calculating the output for each day
+    double total = 0.0;
+    for (int path = 0; path < number_of_paths; path ++){
+        total += cash_flow[path] * std::exp(-interest_rate * exercise_date[path] * time_step);
+    }
+    
+    // Average output for the day
+    return total / number_of_paths;
+}
+
+
 
 int main()
 {
@@ -79,6 +172,13 @@ int main()
 
     std::cout << "European put price:   " << european_put_price << std::endl;
     std::cout << "Black-Scholes:        3.844" << std::endl;
+
+    double time_step = maturity / number_of_steps;
+    double american_put_price = price_american_put(stock_prices, number_of_paths, number_of_steps,
+                                                   strike, interest_rate, time_step);
+
+    std::cout << "American put price:   " << american_put_price << std::endl;
+    std::cout << "Paper's value:        4.478" << std::endl;
 
     return 0;
 }
