@@ -2,6 +2,40 @@
 #include <random>
 #include <cmath>
 #include <iostream>
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+#include <chrono>
+
+
+__global__ void simulate_paths_kernel(double *output,double initial_price, double interest_rate, double volatility, double time_step, int number_of_paths, int number_of_steps, unsigned long long seed, double diffusion, double drift){
+    int path_position = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Dont allow the number of threads to exceed number of paths planned.
+    if (path_position >= number_of_paths) return;
+
+    // Start of this path's row in the flattened array
+    int row_start = path_position * (number_of_steps + 1);
+    
+    // Initial price
+    output[row_start] = initial_price;
+
+    // Generate random numbers for this path
+    curandState generator;
+    curand_init(seed, path_position, 0, &generator);
+
+    double prev_price = initial_price;
+    for (int i = 1; i <= number_of_steps; i++){
+        // Calculate new price
+        double random_num = curand_normal_double(&generator);
+        double new_price = prev_price * exp(drift + diffusion * random_num);
+
+        // Store new price
+        output[row_start + i] = new_price;
+        prev_price = new_price;
+    }
+        
+    return;
+}
 
 
 std::vector<double> simulate_paths(double initial_price, double maturity, int number_of_steps, double interest_rate, double volatility, int number_of_paths, unsigned long long seed){
@@ -12,33 +46,47 @@ std::vector<double> simulate_paths(double initial_price, double maturity, int nu
     // Creating the matrix as one long row
     std::vector<double> stock_prices(number_of_stock_prices);
 
-    // Initialise initial price
-    for (int path = 0; path < number_of_paths; path ++){
-        stock_prices[path * (number_of_steps + 1)] = initial_price;
-    }
-    
-    // Filling up prices in each path
-    // Create dice
-    std::mt19937_64 generator(seed);
-    std::normal_distribution<double> standard_normal(0.0, 1.0);
-
+    // Price formula variables
     double drift = (interest_rate - 0.5 * volatility * volatility) * time_step;
     double diffusion = volatility * std::sqrt(time_step);
+    auto context_setup_start = std::chrono::high_resolution_clock::now();
+    cudaFree(0);
+    auto kernel_setup_start = std::chrono::high_resolution_clock::now();
+    // Set up CUDA kernel
+    double *d_output;
+    cudaMalloc(&d_output, number_of_stock_prices * sizeof(double));
+
+    int threads_per_block = 256;
+    int number_of_blocks = (number_of_paths + threads_per_block - 1) / threads_per_block;
+    auto kernel_setup_end = std::chrono::high_resolution_clock::now();
+    std::cout << "Time taken for MCTS kernel setup no context: " << std::chrono::duration<double, std::milli>(kernel_setup_end - kernel_setup_start).count() << " ms" << std::endl;
+    std::cout << "Time taken for MCTS context setup: " << std::chrono::duration<double, std::milli>(kernel_setup_start - context_setup_start).count() << " ms" << std::endl;
+    auto kernel_run_start = std::chrono::high_resolution_clock::now();
+    simulate_paths_kernel<<<number_of_blocks, threads_per_block>>>(
+    d_output,
+    initial_price,
+    interest_rate,
+    volatility,
+    time_step,
+    number_of_paths,
+    number_of_steps,
+    seed,
+    diffusion,
+    drift
+    );
     
-    // Fill price
-    for (int path = 0; path < number_of_paths; path ++){
-        for (int date = 1; date <= number_of_steps; date ++){
-            double random_num = standard_normal(generator);
-            double prev_price = stock_prices[path * (number_of_steps + 1) + date - 1];
-
-            // store new price
-            stock_prices[path * (number_of_steps + 1) + date] = prev_price * std::exp(drift + diffusion * random_num);
-
-        }
-    }
-
+    cudaDeviceSynchronize();
+    auto kernerl_run_end = std::chrono::high_resolution_clock::now();
+    std::cout << "Time taken for MCTS kernel run: " << std::chrono::duration<double, std::milli>(kernerl_run_end - kernel_run_start).count() << " ms" << std::endl;
+    
+    auto copy_start = std::chrono::high_resolution_clock::now();
+    cudaMemcpy(stock_prices.data(), d_output, number_of_stock_prices * sizeof(double), cudaMemcpyDeviceToHost);
+    auto copy_end = std::chrono::high_resolution_clock::now();
+    std::cout << "Time taken for MCTS copy from device to host: " << std::chrono::duration<double, std::milli>(copy_end - copy_start).count() << " ms" << std::endl;
+    cudaFree(d_output);
     return stock_prices;
 }
+
 
 // Helper to find determinant
 double determinant(double a1, double b1, double c1,
@@ -146,8 +194,12 @@ int main()
     int number_of_paths = 1000000;
     unsigned long long seed = 42;
 
+    auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<double> stock_prices = simulate_paths(initial_price, maturity, number_of_steps,
                                                       interest_rate, volatility, number_of_paths, seed);
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed_milliseconds = end_time - start_time;
+    std::cout << "Time taken for MCTS path simulation: " << elapsed_milliseconds.count() << " ms" << std::endl;
 
     // Check 1: average final price should be close to initial_price * e^(r * maturity)
     double total_final_price = 0.0;

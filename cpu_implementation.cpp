@@ -2,6 +2,8 @@
 #include <random>
 #include <cmath>
 #include <iostream>
+#include <chrono>
+
 
 std::vector<double> simulate_paths(double initial_price, double maturity, int number_of_steps, double interest_rate, double volatility, int number_of_paths, unsigned long long seed){
     // Maturity = number of years till option expires
@@ -145,8 +147,13 @@ int main()
     int number_of_paths = 1000000;
     unsigned long long seed = 42;
 
+    auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<double> stock_prices = simulate_paths(initial_price, maturity, number_of_steps,
                                                       interest_rate, volatility, number_of_paths, seed);
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed_milliseconds = end_time - start_time;
+    std::cout << "Time taken for MCTS path simulation: " << elapsed_milliseconds.count() << " ms" << std::endl;
+
 
     // Check 1: average final price should be close to initial_price * e^(r * maturity)
     double total_final_price = 0.0;
